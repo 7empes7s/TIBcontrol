@@ -1,0 +1,368 @@
+import { Link } from "wouter";
+import { useApi, fmtAge, fmtMs } from "../hooks/useApi";
+import type { HomeData } from "../../server/api/types";
+
+function StatusDot({ status }: { status: string }) {
+  const cls = status === "active" ? "active" : status === "failed" ? "failed" : status === "inactive" ? "inactive" : "unknown";
+  return <span className={`svc-pill ${cls}`}><span className="dot" />{status === "active" ? "" : ""}</span>;
+}
+
+function Pill({ children, color = "gray" }: { children: React.ReactNode; color?: "green" | "red" | "amber" | "gray" | "blue" }) {
+  return <span className={`pill ${color}`}>{children}</span>;
+}
+
+function WCard({ href, children, className = "" }: { href?: string; children: React.ReactNode; className?: string }) {
+  if (href) {
+    return <Link href={href} className={`w-card ${className}`}>{children}</Link>;
+  }
+  return <div className={`w-card ${className}`}>{children}</div>;
+}
+
+function SparkBars({ values }: { values: number[] }) {
+  const max = Math.max(...values, 1);
+  return (
+    <div className="sparkbar-row">
+      {values.map((v, i) => (
+        <div key={i} className="sparkbar" style={{ height: `${Math.max(2, Math.round((v / max) * 28))}px` }} />
+      ))}
+    </div>
+  );
+}
+
+export function DashHome() {
+  const { data, loading, error } = useApi<HomeData>("/api/home", 20_000);
+
+  if (loading && !data) return <div className="loading-dim">loading…</div>;
+  if (error && !data) return <div className="loading-dim" style={{ color: "var(--red)" }}>failed to load: {error}</div>;
+  if (!data) return null;
+
+  const d = data;
+
+  // GPU pill color
+  const gpuColor = d.gpu.status === "up" ? "green" : d.gpu.status === "down" ? "red" : "amber";
+
+  // Autopipeline color
+  const pipeColor = d.autopipeline.paused ? "amber" : "green";
+
+  // Doctor success rate
+  const doctorRate = d.doctor.last24h.total > 0
+    ? Math.round((d.doctor.last24h.success / d.doctor.last24h.total) * 100)
+    : null;
+
+  // Model quality summary
+  const qualityProblems = d.models.qualitySummary.blocked + d.models.qualitySummary.degraded + d.models.qualitySummary.probation;
+
+  return (
+    <div className="dash-page">
+
+      {/* ── Stack health ─────────────────────────────── */}
+      <div className="dash-section">
+        <div className="dash-section-title">stack health</div>
+        <WCard href="/infra" className="full">
+          <div className="w-label">services</div>
+          <div className="service-strip">
+            {d.services.map((s) => (
+              <span key={s.name} className={`svc-pill ${s.status}`}>
+                <span className="dot" />
+                {s.name}
+              </span>
+            ))}
+          </div>
+        </WCard>
+
+        <div className="widget-grid" style={{ marginTop: 8 }}>
+          <WCard href="/infra#gpu">
+            <div className="w-label">gpu</div>
+            <div className="w-row">
+              <Pill color={gpuColor}>{d.gpu.status}</Pill>
+              {d.gpu.gpuUtil !== null && <span className="w-caption">{d.gpu.gpuUtil}% util</span>}
+            </div>
+            {d.gpu.loadedModels.length > 0 && (
+              <div className="w-caption" style={{ marginTop: 4 }}>
+                {d.gpu.loadedModels.join(", ")}
+              </div>
+            )}
+            <div className="w-caption">{fmtAge(d.gpu.checkedAgo)}</div>
+          </WCard>
+
+          <WCard href="/infra#vast">
+            <div className="w-label">vast balance</div>
+            <div className="w-headline sm">
+              {d.vast.balance !== null ? `$${((d.vast.balance ?? 0) + (d.vast.credit ?? 0)).toFixed(2)}` : "—"}
+            </div>
+            {d.vast.runwayHours !== null && (
+              <div className="w-caption">{d.vast.runwayHours}h runway · ${d.vast.hourlyRate}/hr</div>
+            )}
+            {d.vast.instanceStatus && (
+              <div className="w-row" style={{ marginTop: 6 }}>
+                <Pill color={d.vast.instanceStatus === "running" ? "green" : "amber"}>{d.vast.instanceStatus}</Pill>
+                {d.vast.gpu && <span className="w-caption">{d.vast.gpu}</span>}
+              </div>
+            )}
+          </WCard>
+
+          <WCard href="/infra#hetzner">
+            <div className="w-label">hetzner</div>
+            <div className="w-row">
+              <span className="w-caption">RAM {d.hetzner.memUsedPct}%</span>
+              <span className="w-caption">Disk {d.hetzner.diskUsedPct}%</span>
+            </div>
+            <div className="w-caption">load {d.hetzner.load1.toFixed(2)} / {d.hetzner.load5.toFixed(2)} / {d.hetzner.load15.toFixed(2)}</div>
+          </WCard>
+        </div>
+      </div>
+
+      {/* ── NewsBites ─────────────────────────────────── */}
+      <div className="dash-section">
+        <div className="dash-section-title">newsbites</div>
+        <div className="widget-grid">
+          <WCard href="/newsbites">
+            <div className="w-label">total published</div>
+            <div className="w-headline">{d.newsbites.totalPublished}</div>
+            <div className="w-caption">+{d.newsbites.publishedToday} today</div>
+          </WCard>
+
+          <WCard href="/newsbites#publish-rate">
+            <div className="w-label">7d publish rate</div>
+            <SparkBars values={d.newsbites.publishedLast7d} />
+            <div className="w-caption">{d.newsbites.publishedLast7d.reduce((a, b) => a + b, 0)} this week</div>
+          </WCard>
+
+          <WCard href="/newsbites#by-vertical">
+            <div className="w-label">top verticals</div>
+            {d.newsbites.topVerticals.slice(0, 4).map((v) => (
+              <div key={v.vertical} className="w-row" style={{ marginBottom: 2 }}>
+                <span className="w-caption" style={{ flex: 1 }}>{v.vertical}</span>
+                <span className="w-caption">{v.count}</span>
+              </div>
+            ))}
+          </WCard>
+
+          <WCard href="/newsbites">
+            <div className="w-label">latest published</div>
+            {d.newsbites.latestArticles.map((a) => (
+              <div key={a.slug} style={{ marginBottom: 5 }}>
+                <div style={{ fontSize: 11, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.title}</div>
+                <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text-dim)" }}>{a.vertical} · {a.date}</div>
+              </div>
+            ))}
+            <div className="w-row">
+              <Pill color={d.newsbites.siteReachable ? "green" : "red"}>{d.newsbites.siteReachable ? "site up" : "site down"}</Pill>
+            </div>
+          </WCard>
+        </div>
+      </div>
+
+      {/* ── Autopipeline ──────────────────────────────── */}
+      <div className="dash-section">
+        <div className="dash-section-title">autopipeline</div>
+        <div className="widget-grid">
+          <WCard href="/autopipeline#queue">
+            <div className="w-label">queue depth</div>
+            <div className="w-headline">{d.autopipeline.queueDepth}</div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 6 }}>
+              {Object.entries(d.autopipeline.stageBreakdown).map(([stage, count]) => (
+                <span key={stage} className="pill gray">{stage} {count}</span>
+              ))}
+            </div>
+          </WCard>
+
+          <WCard href="/autopipeline#current">
+            <div className="w-label">current story</div>
+            {d.autopipeline.currentStory ? (
+              <>
+                <div className="w-headline xs" style={{ marginBottom: 4 }}>
+                  {d.autopipeline.currentStory.slug ?? d.autopipeline.currentStory.id}
+                </div>
+                <Pill color="amber">{d.autopipeline.currentStory.stage}</Pill>
+              </>
+            ) : (
+              <div className="w-caption">idle</div>
+            )}
+          </WCard>
+
+          <WCard href="/autopipeline#approvals">
+            <div className="w-label">approvals waiting</div>
+            <div className="w-headline">{d.autopipeline.approvalsWaiting}</div>
+            {d.autopipeline.oldestApprovalAgeMs && (
+              <div className="w-caption">oldest {fmtMs(d.autopipeline.oldestApprovalAgeMs)}</div>
+            )}
+          </WCard>
+
+          <WCard href="/autopipeline">
+            <div className="w-label">pause state</div>
+            <div className="w-row">
+              <Pill color={pipeColor}>{d.autopipeline.paused ? "paused" : "running"}</Pill>
+            </div>
+            {d.autopipeline.pauseReason && (
+              <div className="w-caption">{d.autopipeline.pauseReason}</div>
+            )}
+          </WCard>
+        </div>
+      </div>
+
+      {/* ── Doctor ────────────────────────────────────── */}
+      <div className="dash-section">
+        <div className="dash-section-title">doctor</div>
+        <div className="widget-grid">
+          <WCard href="/doctor">
+            <div className="w-label">repairs 24h</div>
+            <div className="w-headline">{d.doctor.last24h.total}</div>
+            {doctorRate !== null && (
+              <div className="w-caption">{doctorRate}% success</div>
+            )}
+          </WCard>
+
+          <WCard href="/doctor#errors">
+            <div className="w-label">top error classes</div>
+            {d.doctor.last24h.errorClasses.slice(0, 3).map((e) => (
+              <div key={e.type} className="w-row" style={{ marginBottom: 2 }}>
+                <span className="w-caption" style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.type}</span>
+                <span className="w-caption">{e.count}</span>
+              </div>
+            ))}
+            {d.doctor.last24h.errorClasses.length === 0 && <div className="w-caption">none</div>}
+          </WCard>
+
+          <WCard href="/doctor#models">
+            <div className="w-label">top failing models</div>
+            {d.doctor.last24h.topFailingModels.slice(0, 3).map((m) => (
+              <div key={m.model} className="w-row" style={{ marginBottom: 2 }}>
+                <span className="w-caption" style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.model}</span>
+                <span className="w-caption">{m.count}</span>
+              </div>
+            ))}
+            {d.doctor.last24h.topFailingModels.length === 0 && <div className="w-caption">none</div>}
+          </WCard>
+
+          <WCard href="/doctor#verdicts">
+            <div className="w-label">verdict mix</div>
+            {d.doctor.last24h.verdictMix.slice(0, 4).map((v) => (
+              <div key={v.action} className="w-row" style={{ marginBottom: 2 }}>
+                <span className="w-caption" style={{ flex: 1 }}>{v.action}</span>
+                <span className="w-caption">{v.count}</span>
+              </div>
+            ))}
+            {d.doctor.last24h.verdictMix.length === 0 && <div className="w-caption">none</div>}
+          </WCard>
+        </div>
+      </div>
+
+      {/* ── Models ────────────────────────────────────── */}
+      <div className="dash-section">
+        <div className="dash-section-title">models</div>
+        <div className="widget-grid">
+          <WCard href="/models#current">
+            <div className="w-label">best right now</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
+              {d.models.bestCloudHeavy && (
+                <div className="w-row">
+                  <span className="pill gray" style={{ fontSize: 9 }}>heavy</span>
+                  <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--accent)" }}>{d.models.bestCloudHeavy}</span>
+                </div>
+              )}
+              {d.models.bestCloudFast && (
+                <div className="w-row">
+                  <span className="pill gray" style={{ fontSize: 9 }}>fast</span>
+                  <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--text)" }}>{d.models.bestCloudFast}</span>
+                </div>
+              )}
+              {d.models.bestLocal && (
+                <div className="w-row">
+                  <span className="pill gray" style={{ fontSize: 9 }}>local</span>
+                  <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--text)" }}>{d.models.bestLocal}</span>
+                </div>
+              )}
+            </div>
+          </WCard>
+
+          <WCard href="/models#by-capability">
+            <div className="w-label">available models</div>
+            <div style={{ display: "flex", gap: 12, marginTop: 6 }}>
+              <div>
+                <div className="w-headline sm">{d.models.availableByCapability.heavy}</div>
+                <div className="w-caption">heavy</div>
+              </div>
+              <div>
+                <div className="w-headline sm">{d.models.availableByCapability.medium}</div>
+                <div className="w-caption">medium</div>
+              </div>
+              <div>
+                <div className="w-headline sm">{d.models.availableByCapability.light}</div>
+                <div className="w-caption">light</div>
+              </div>
+            </div>
+          </WCard>
+
+          <WCard href="/models#quality">
+            <div className="w-label">quality flags</div>
+            <div className="w-row" style={{ flexWrap: "wrap", gap: 4, marginTop: 4 }}>
+              {d.models.qualitySummary.blocked > 0 && <Pill color="red">blocked {d.models.qualitySummary.blocked}</Pill>}
+              {d.models.qualitySummary.degraded > 0 && <Pill color="amber">degraded {d.models.qualitySummary.degraded}</Pill>}
+              {d.models.qualitySummary.probation > 0 && <Pill color="amber">probation {d.models.qualitySummary.probation}</Pill>}
+              {qualityProblems === 0 && <Pill color="green">all clear</Pill>}
+            </div>
+          </WCard>
+
+          <WCard href="/models#new">
+            <div className="w-label">discovery</div>
+            {d.models.newModelsAdded.length > 0 ? (
+              <>
+                <div className="w-headline sm">{d.models.newModelsAdded.length}</div>
+                <div className="w-caption">new in last check</div>
+                <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text-dim)", marginTop: 4 }}>
+                  {d.models.newModelsAdded.slice(0, 2).join(", ")}
+                  {d.models.newModelsAdded.length > 2 && ` +${d.models.newModelsAdded.length - 2}`}
+                </div>
+              </>
+            ) : (
+              <div className="w-caption">no new models in last check</div>
+            )}
+            <div className="w-caption">
+              {d.models.lastFullCheckAgo > 0 ? `full check ${fmtAge(d.models.lastFullCheckAgo)}` : ""}
+            </div>
+          </WCard>
+
+          {d.models.cooldownsActive > 0 && (
+            <WCard href="/models#cooldowns">
+              <div className="w-label">cooldowns active</div>
+              <div className="w-headline sm">{d.models.cooldownsActive}</div>
+              {d.models.soonestCooldownExpiresMs && (
+                <div className="w-caption">soonest expires {fmtMs(d.models.soonestCooldownExpiresMs - Date.now())}</div>
+              )}
+            </WCard>
+          )}
+        </div>
+      </div>
+
+      {/* ── OpenCode + Incidents ─────────────────────── */}
+      <div className="dash-section">
+        <div className="dash-section-title">opencode · incidents</div>
+        <div className="widget-grid">
+          <WCard href="/opencode">
+            <div className="w-label">opencode</div>
+            <div className="w-row">
+              <Pill color="blue">open chat →</Pill>
+            </div>
+            <div className="w-caption" style={{ marginTop: 6 }}>existing session UI</div>
+          </WCard>
+
+          <WCard>
+            <div className="w-label">active incidents</div>
+            <div className="w-headline sm">{d.incidents.activeCount}</div>
+            {d.incidents.recentAlerts.length > 0 && (
+              <div style={{ marginTop: 6 }}>
+                {d.incidents.recentAlerts.slice(0, 3).map((a) => (
+                  <div key={a.key} style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text-dim)", marginBottom: 2 }}>
+                    {a.key}
+                  </div>
+                ))}
+              </div>
+            )}
+          </WCard>
+        </div>
+      </div>
+
+    </div>
+  );
+}
