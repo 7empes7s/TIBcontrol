@@ -12,6 +12,57 @@ export function ok<T>(data: T, sources: Record<string, SourceStatus> = {}): ApiE
 
 // ── Shared primitives ─────────────────────────────────────────────────────
 
+export interface EvidenceRef {
+  label: string;
+  kind: "file" | "api" | "command" | "log" | "git" | "url" | "db";
+  ref: string;
+  redacted?: boolean;
+}
+
+export interface ActionDescriptor {
+  id: string;
+  label: string;
+  kind:
+    | "navigate"
+    | "refresh"
+    | "run-command"
+    | "start-job"
+    | "mutate-policy"
+    | "open-shell"
+    | "open-workspace"
+    | "open-source"
+    | "create-agent-task"
+    | "acknowledge"
+    | "resolve"
+    | "mute"
+    | "external-link"
+    | "copy-command"
+    | "export"
+    | "preview";
+  targetType: string;
+  targetId: string;
+  risk: "low" | "medium" | "high" | "destructive";
+  confirm: boolean;
+  reasonRequired: boolean;
+  disabled?: boolean;
+  disabledReason?: string;
+  evidenceRefs: EvidenceRef[];
+  impactPreview?: string;
+  rollbackHint?: string;
+  expectedDurationMs?: number;
+  jobKind?: string;
+  sourceRoute?: string;
+  requiresOnline?: boolean;
+}
+
+export interface ActionableEntity<T> {
+  entity: T;
+  health: "ok" | "warn" | "critical" | "unknown";
+  freshness: "fresh" | "stale" | "missing";
+  evidence: EvidenceRef[];
+  actions: ActionDescriptor[];
+}
+
 export interface ServicePill {
   name: string;
   status: "active" | "inactive" | "failed" | "unknown";
@@ -160,6 +211,22 @@ export interface DoctorDetail {
   lastDecision: { ts: string; slug: string; action: string; reason: string } | null;
 }
 
+export interface WorkloadScores {
+  json: number | null;
+  coding: number | null;
+  writing: number | null;
+  reasoning: number | null;
+  lastProbedAt: number | null;
+}
+
+export interface RatingBreakdown {
+  score: number | null;
+  confidence: number;
+  sources: string[];
+  missing: string[];
+  components: Record<string, { score: number; weight: number; contribution: number }>;
+}
+
 export interface ModelsDetail {
   models: {
     logicalName: string;
@@ -172,6 +239,19 @@ export interface ModelsDetail {
     qualityStatus: string;
     recentFailures: number;
     consecutiveGarbage: number;
+    isFree: boolean;
+    isPaid: boolean;
+    isSubscription?: boolean;
+    pricingTier?: "free-local" | "free-rate-limited" | "subscription" | "api-paid";
+    isOpenCode: boolean;
+    isCli: boolean;
+    providerType: "openrouter" | "groq" | "github" | "cerebras" | "local" | "zen" | "nvidia" | "cloudflare" | "opencode" | "alibaba" | "other";
+    contextWindow: number | null;
+    params: number | null;
+    resolvedModel: string | null;
+    rating100: number | null;
+    ratingBreakdown: RatingBreakdown | null;
+    workloadScores: WorkloadScores | null;
   }[];
   cooldowns: { model: string; startedAt: number | null; expiresAt: number; reason?: string }[];
   fallbacks: Record<string, string[]>;

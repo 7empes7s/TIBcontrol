@@ -5,6 +5,7 @@ import { getModelHealth } from "../adapters/models.ts";
 import { getDoctorStats } from "../adapters/doctor.ts";
 import { getArticles, buildNewsBitesWidget, isSiteReachable } from "../adapters/newsbites.ts";
 import { getVastInstance, getVastAccount } from "../adapters/vast.ts";
+import { runHomeSampler } from "../db/sampler.ts";
 import { ok, type ApiEnvelope, type HomeData, type SourceStatus } from "./types.ts";
 
 function readJson<T>(path: string): T | null {
@@ -17,7 +18,49 @@ async function settled<T>(fn: () => Promise<T> | T): Promise<{ ok: true; value: 
   catch { return { ok: false }; }
 }
 
+type HomeBuildResult = { data: HomeData; sources: Record<string, SourceStatus> };
+
+let cachedHome: { value: HomeBuildResult; ts: number } | null = null;
+let homeBuildInFlight: Promise<HomeBuildResult> | null = null;
+const HOME_CACHE_MS = 15_000;
+
 export async function homeHandler(): Promise<Response> {
+  const { data, sources } = await getHomeDataForRequest();
+  try { runHomeSampler(data); } catch (e) { console.error("[home] sampler failed", e); }
+
+  const envelope: ApiEnvelope<HomeData> = ok(data, sources);
+  return new Response(JSON.stringify(envelope), {
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+async function getHomeDataForRequest(): Promise<HomeBuildResult> {
+  if (cachedHome && Date.now() - cachedHome.ts < HOME_CACHE_MS) {
+    return cachedHome.value;
+  }
+  if (cachedHome && homeBuildInFlight) {
+    return {
+      data: cachedHome.value.data,
+      sources: { ...cachedHome.value.sources, cache: "stale" },
+    };
+  }
+  return buildHomeData();
+}
+
+export async function buildHomeData(): Promise<HomeBuildResult> {
+  if (homeBuildInFlight) return homeBuildInFlight;
+
+  homeBuildInFlight = buildHomeDataUncached();
+  try {
+    const value = await homeBuildInFlight;
+    cachedHome = { value, ts: Date.now() };
+    return value;
+  } finally {
+    homeBuildInFlight = null;
+  }
+}
+
+async function buildHomeDataUncached(): Promise<HomeBuildResult> {
   const sources: Record<string, SourceStatus> = {};
 
   // ── Parallel fetch all sources ──────────────────────────────────────────
@@ -171,8 +214,5 @@ export async function homeHandler(): Promise<Response> {
     },
   };
 
-  const envelope: ApiEnvelope<HomeData> = ok(data, sources);
-  return new Response(JSON.stringify(envelope), {
-    headers: { "Content-Type": "application/json" },
-  });
+  return { data, sources };
 }

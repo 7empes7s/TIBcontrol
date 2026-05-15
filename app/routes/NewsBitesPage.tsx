@@ -1,6 +1,10 @@
 import { useState, useEffect } from "react";
 import { useApi } from "../hooks/useApi";
+import { authFetch } from "../lib/authFetch";
 import { ConfirmModal } from "../components/ConfirmModal";
+import { SectionCard } from "../components/SectionCard";
+import { useTablePage } from "../hooks/useTablePage";
+import { TablePageControls } from "../components/TablePageControls";
 import type { NewsBitesDetail } from "../../server/api/types";
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell,
@@ -39,21 +43,25 @@ export function NewsBitesPage() {
     return () => clearInterval(poll);
   }, [jobId, jobStatus?.status]);
 
+  // Compute filtered before early returns so useTablePage is called unconditionally
+  const normalizedSearch = search.trim().toLowerCase();
+  const filtered = (data?.articles ?? []).filter((a) => {
+    if (filterStatus && a.status !== filterStatus) return false;
+    if (filterVertical && a.vertical !== filterVertical) return false;
+    if (normalizedSearch && !a.title.toLowerCase().includes(normalizedSearch) && !a.slug.toLowerCase().includes(normalizedSearch)) return false;
+    return true;
+  });
+  const articlesPage = useTablePage(filtered);
+
   if (loading && !data) return <div className="loading-dim">loading…</div>;
-  if (error && !data) return <div className="loading-dim" style={{ color: "var(--red)" }}>error: {error}</div>;
+  if (error && !data) return <div className="loading-dim error">error: {error}</div>;
   if (!data) return null;
 
   const d = data;
   const s = d.stats;
 
+  const statuses = [...new Set(d.articles.map((a) => a.status).filter(Boolean))].sort();
   const verticals = [...new Set(d.articles.map((a) => a.vertical).filter(Boolean))].sort();
-
-  const filtered = d.articles.filter((a) => {
-    if (filterStatus && a.status !== filterStatus) return false;
-    if (filterVertical && a.vertical !== filterVertical) return false;
-    if (search && !a.title.toLowerCase().includes(search.toLowerCase()) && !a.slug.includes(search.toLowerCase())) return false;
-    return true;
-  });
 
   const last30dTotal = s.publishedLast30d.reduce((acc, x) => acc + x.count, 0);
 
@@ -101,10 +109,9 @@ export function NewsBitesPage() {
             setDeploying(true);
             setDeployError(null);
             try {
-              const cfg = await fetch("/api/config").then((r) => r.json()) as { operatorToken: string };
-              const res = await fetch("/api/newsbites/deploy", {
+              const res = await authFetch("/api/newsbites/deploy", {
                 method: "POST",
-                headers: { "Content-Type": "application/json", "X-Operator-Token": cfg.operatorToken },
+                headers: { "Content-Type": "application/json" },
               });
               const json = await res.json() as { jobId?: string; error?: string };
               if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
@@ -143,8 +150,7 @@ export function NewsBitesPage() {
       )}
 
       {/* Vertical mix */}
-      <div className="section-card" id="by-vertical" style={{ marginBottom: 16 }}>
-        <div className="section-card-header"><span className="title">vertical mix (published)</span></div>
+      <SectionCard title="vertical mix (published)" id="by-vertical" defaultOpen={false}>
         <div className="section-card-body" style={{ padding: "10px 14px", display: "flex", flexWrap: "wrap", gap: 6 }}>
           {s.verticalMix.map((v) => (
             <span key={v.vertical} className="pill gray" style={{ cursor: "pointer" }}
@@ -153,14 +159,15 @@ export function NewsBitesPage() {
             </span>
           ))}
         </div>
-      </div>
+      </SectionCard>
 
       {/* Publish rate last 30d */}
-      <div className="section-card" id="publish-rate" style={{ marginBottom: 16 }}>
-        <div className="section-card-header">
-          <span className="title">publish rate · last 30 days</span>
-          <span className="dim" style={{ fontFamily: "var(--mono)", fontSize: 10 }}>{last30dTotal} articles</span>
-        </div>
+      <SectionCard
+        title="publish rate · last 30 days"
+        id="publish-rate"
+        defaultOpen={false}
+        right={<span className="dim" style={{ fontFamily: "var(--mono)", fontSize: 10 }}>{last30dTotal} articles</span>}
+      >
         <div className="section-card-body" style={{ padding: "10px 14px" }}>
           <ResponsiveContainer width="100%" height={80}>
             <BarChart data={s.publishedLast30d} margin={{ top: 2, right: 0, bottom: 0, left: 0 }}>
@@ -188,57 +195,83 @@ export function NewsBitesPage() {
             {s.publishedLast30d[0]?.date} → {s.publishedLast30d[s.publishedLast30d.length - 1]?.date}
           </div>
         </div>
-      </div>
+      </SectionCard>
 
       {/* Articles table */}
-      <div className="section-card">
-        <div className="section-card-header">
-          <span className="title">articles</span>
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="search…"
-              style={{ fontFamily: "var(--mono)", fontSize: 11, background: "var(--bg-hover)", border: "1px solid var(--border)", color: "var(--text)", padding: "3px 8px", borderRadius: 3, width: 140 }} />
-            <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)}
-              style={{ fontFamily: "var(--mono)", fontSize: 11, background: "var(--bg-hover)", border: "1px solid var(--border)", color: "var(--text)", padding: "3px 8px", borderRadius: 3 }}>
+      <SectionCard
+        title="articles"
+        defaultOpen={false}
+        right={
+          <span className="dim" style={{ fontFamily: "var(--mono)", fontSize: 10 }}>
+            {filtered.length} of {d.articles.length}
+          </span>
+        }
+      >
+        <div className="section-card-body table-wrap">
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", padding: "10px 14px", borderBottom: "1px solid var(--border)" }}>
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="search…"
+              style={{ fontFamily: "var(--mono)", fontSize: 11, background: "var(--bg-hover)", border: "1px solid var(--border)", color: "var(--text)", padding: "6px 9px", borderRadius: 3, width: 190 }}
+            />
+            <select
+              value={filterStatus}
+              onChange={(e) => setFilterStatus(e.target.value)}
+              style={{ fontFamily: "var(--mono)", fontSize: 11, background: "var(--bg-hover)", border: "1px solid var(--border)", color: "var(--text)", padding: "6px 9px", borderRadius: 3 }}
+            >
               <option value="">all status</option>
-              <option value="published">published</option>
-              <option value="approved">approved</option>
-              <option value="draft">draft</option>
+              {statuses.map((status) => <option key={status} value={status}>{status}</option>)}
             </select>
-            <select value={filterVertical} onChange={(e) => setFilterVertical(e.target.value)}
-              style={{ fontFamily: "var(--mono)", fontSize: 11, background: "var(--bg-hover)", border: "1px solid var(--border)", color: "var(--text)", padding: "3px 8px", borderRadius: 3 }}>
+            <select
+              value={filterVertical}
+              onChange={(e) => setFilterVertical(e.target.value)}
+              style={{ fontFamily: "var(--mono)", fontSize: 11, background: "var(--bg-hover)", border: "1px solid var(--border)", color: "var(--text)", padding: "6px 9px", borderRadius: 3 }}
+            >
               <option value="">all verticals</option>
               {verticals.map((v) => <option key={v} value={v}>{v}</option>)}
             </select>
+            {(search || filterStatus || filterVertical) && (
+              <button
+                className="btn btn-ghost btn-sm"
+                onClick={() => { setSearch(""); setFilterStatus(""); setFilterVertical(""); }}
+              >
+                Clear filters
+              </button>
+            )}
           </div>
+
+          {filtered.length === 0 ? (
+            <div className="loading-dim">no articles match filters</div>
+          ) : (
+            <table className="data-table">
+              <thead><tr>
+                <th>title</th><th>vertical</th><th>date</th><th>status</th><th>~words</th>
+              </tr></thead>
+              <tbody>
+                {articlesPage.slice.map((a) => (
+                  <tr key={a.slug}>
+                    <td style={{ maxWidth: 320, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      <a href={`https://news.techinsiderbytes.com/articles/${a.slug}`}
+                        target="_blank" rel="noreferrer"
+                        style={{ color: "var(--text)", textDecoration: "none" }}
+                        onMouseOver={(e) => (e.currentTarget.style.color = "var(--accent)")}
+                        onMouseOut={(e) => (e.currentTarget.style.color = "var(--text)")}>
+                        {a.title || a.slug}
+                      </a>
+                    </td>
+                    <td className="mono dim">{a.vertical}</td>
+                    <td className="mono dim">{a.date}</td>
+                    <td><Pill color={statusColor(a.status)}>{a.status}</Pill></td>
+                    <td className="mono dim">{a.wordCount > 0 ? `~${a.wordCount}` : "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </div>
-        <div className="section-card-body table-wrap">
-          <table className="data-table">
-            <thead><tr>
-              <th>title</th><th>vertical</th><th>date</th><th>status</th><th>~words</th>
-            </tr></thead>
-            <tbody>
-              {filtered.slice(0, 200).map((a) => (
-                <tr key={a.slug}>
-                  <td style={{ maxWidth: 320, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    <a href={`https://news.techinsiderbytes.com/articles/${a.slug}`}
-                      target="_blank" rel="noreferrer"
-                      style={{ color: "var(--text)", textDecoration: "none" }}
-                      onMouseOver={(e) => (e.currentTarget.style.color = "var(--accent)")}
-                      onMouseOut={(e) => (e.currentTarget.style.color = "var(--text)")}>
-                      {a.title || a.slug}
-                    </a>
-                  </td>
-                  <td className="mono dim">{a.vertical}</td>
-                  <td className="mono dim">{a.date}</td>
-                  <td><Pill color={statusColor(a.status)}>{a.status}</Pill></td>
-                  <td className="mono dim">{a.wordCount > 0 ? `~${a.wordCount}` : "—"}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {filtered.length > 200 && <div className="loading-dim">showing 200 of {filtered.length}</div>}
-        </div>
-      </div>
+        <TablePageControls {...articlesPage} onPrev={articlesPage.prev} onNext={articlesPage.next} onSetPageSize={articlesPage.setPageSize} noun="articles" />
+      </SectionCard>
     </div>
   );
 }

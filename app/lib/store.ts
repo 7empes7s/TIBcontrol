@@ -1,6 +1,7 @@
 import { create } from "zustand";
+import { authFetch } from "./authFetch";
 
-const API = "/opencode";
+const API = "/opencode-api";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -45,14 +46,45 @@ export type Message = {
 export type Permission = {
   id: string;
   sessionID: string;
-  createdAt: number;
+  createdAt?: number;
+  permission?: string;
+  patterns?: string[];
   metadata: { message?: string; title?: string; [k: string]: unknown };
+};
+
+export type ProviderModel = {
+  id: string;
+  providerID: string;
+  name: string;
+  capabilities?: {
+    input?: { text?: boolean; image?: boolean; audio?: boolean; pdf?: boolean };
+    attachment?: boolean;
+  };
+};
+
+export type Provider = {
+  id: string;
+  name: string;
+  models: Record<string, ProviderModel>;
+};
+
+export type Attachment = {
+  id: string;
+  filename: string;
+  mime: string;
+  url: string;
+  size: number;
+  kind: "image" | "file";
 };
 
 // ── Store ──────────────────────────────────────────────────────────────────
 
 interface State {
   ready: boolean;
+  serverStatus: "available" | "unavailable";
+  serverVersion: string | null;
+  serverUrl: string;
+  error: string | null;
   sessions: Session[];
   activeSession: Session | null;
   messages: Message[];
@@ -60,14 +92,24 @@ interface State {
   messageOrder: string[];
   messageParts: Record<string, string[]>;
   running: boolean;
+  isStreaming: boolean;
   permission: Permission | null;
 
+  providers: Provider[];
+  currentModel: string | null;
+
   init: () => Promise<void>;
+  connect: (url?: string, username?: string, password?: string) => Promise<void>;
+  disconnect: () => void;
+  setActiveSession: (session: Session | null) => void;
   selectSession: (session: Session) => Promise<void>;
-  createSession: () => Promise<Session | null>;
+  createSession: (opts?: { directory?: string; title?: string }) => Promise<Session | null>;
   deleteSession: (id: string) => Promise<void>;
-  sendMessage: (content: string) => Promise<void>;
+  sendMessage: (content: string, attachments?: Attachment[]) => Promise<void>;
+  abortSession: () => Promise<void>;
   replyPermission: (id: string, action: "allow" | "deny") => Promise<void>;
+  loadProviders: () => Promise<void>;
+  setModel: (modelId: string) => Promise<void>;
 }
 
 let sse: EventSource | null = null;
@@ -85,7 +127,7 @@ function startSSE(dispatch: (event: MessageEvent) => void) {
 }
 
 async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${API}${path}`, {
+  const res = await authFetch(`${API}${path}`, {
     headers: { "Content-Type": "application/json" },
     ...options,
   });
@@ -94,6 +136,21 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
     throw new Error(`${res.status}: ${text}`);
   }
   return res.json();
+}
+
+async function apiPostJsonOk(path: string, body: Record<string, unknown>): Promise<boolean> {
+  const res = await authFetch(`${API}${path}`, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) return false;
+
+  const contentType = res.headers.get("content-type") ?? "";
+  if (!contentType.includes("application/json")) return false;
+  await res.json().catch(() => null);
+  return true;
 }
 
 export const useStore = create<State>((set, get) => {
@@ -147,7 +204,7 @@ export const useStore = create<State>((set, get) => {
       case "session.idle": {
         const sid = (ev.properties as { sessionID: string }).sessionID;
         if (!activeSession || sid !== activeSession.id) return;
-        set({ running: false });
+        set({ running: false, isStreaming: false });
         apiFetch<Session[]>("/session").then((sessions) => set({ sessions })).catch(() => {});
         break;
       }
@@ -156,11 +213,12 @@ export const useStore = create<State>((set, get) => {
         const sid = (ev.properties as { sessionID: string }).sessionID;
         if (!activeSession || sid !== activeSession.id) return;
         const status = (ev.properties as { status: string }).status;
-        set({ running: status === "running" });
+        set({ running: status === "running", isStreaming: status === "running" });
         break;
       }
 
-      case "permission.updated": {
+      case "permission.updated":
+      case "permission.asked": {
         const perm = ev.properties as unknown as Permission;
         if (!activeSession || perm.sessionID !== activeSession.id) return;
         set({ permission: perm });
@@ -176,6 +234,10 @@ export const useStore = create<State>((set, get) => {
 
   return {
     ready: false,
+    serverStatus: "unavailable",
+    serverVersion: null,
+    serverUrl: API,
+    error: null,
     sessions: [],
     activeSession: null,
     messages: [],
@@ -183,12 +245,51 @@ export const useStore = create<State>((set, get) => {
     messageOrder: [],
     messageParts: {},
     running: false,
+    isStreaming: false,
     permission: null,
+    providers: [],
+    currentModel: null,
 
     init: async () => {
-      startSSE(handleSSE);
-      const sessions = await apiFetch<Session[]>("/session");
-      set({ sessions, ready: true });
+      try {
+        startSSE(handleSSE);
+        const sessions = await apiFetch<Session[]>("/session");
+        set({ sessions, ready: true, serverStatus: "available", error: null });
+        get().loadProviders().catch(() => {});
+      } catch (e) {
+        set({
+          ready: false,
+          serverStatus: "unavailable",
+          error: e instanceof Error ? e.message : String(e),
+        });
+        throw e;
+      }
+    },
+
+    connect: async (url?: string) => {
+      if (url) set({ serverUrl: url });
+      await get().init();
+    },
+
+    disconnect: () => {
+      if (sse) { sse.close(); sse = null; }
+      set({
+        ready: false,
+        serverStatus: "unavailable",
+        activeSession: null,
+        sessions: [],
+        messages: [],
+        parts: {},
+        messageOrder: [],
+        messageParts: {},
+        running: false,
+        isStreaming: false,
+        permission: null,
+      });
+    },
+
+    setActiveSession: (session) => {
+      set({ activeSession: session });
     },
 
     selectSession: async (session: Session) => {
@@ -199,6 +300,7 @@ export const useStore = create<State>((set, get) => {
         messageOrder: [],
         messageParts: {},
         running: false,
+        isStreaming: false,
         permission: null,
       });
       type RawMsg = { info: Message["info"]; parts: Part[] };
@@ -214,10 +316,13 @@ export const useStore = create<State>((set, get) => {
       set({ messages: raw, parts, messageParts, messageOrder });
     },
 
-    createSession: async () => {
+    createSession: async (opts) => {
+      const body: Record<string, unknown> = {};
+      if (opts?.directory) body.directory = opts.directory;
+      if (opts?.title) body.title = opts.title;
       const session = await apiFetch<Session>("/session", {
         method: "POST",
-        body: JSON.stringify({}),
+        body: JSON.stringify(body),
       });
       const sessions = await apiFetch<Session[]>("/session");
       set({ sessions });
@@ -236,24 +341,71 @@ export const useStore = create<State>((set, get) => {
       }
     },
 
-    sendMessage: async (content: string) => {
+    sendMessage: async (content: string, attachments) => {
       const { activeSession } = get();
       if (!activeSession) return;
-      set({ running: true });
+      set({ running: true, isStreaming: true });
+      const parts: Array<Record<string, unknown>> = [];
+      if (content.trim()) parts.push({ type: "text", text: content });
+      for (const a of attachments ?? []) {
+        parts.push({
+          type: "file",
+          mime: a.mime,
+          filename: a.filename,
+          url: a.url,
+        });
+      }
       await apiFetch(`/session/${activeSession.id}/message`, {
         method: "POST",
-        body: JSON.stringify({ parts: [{ type: "text", text: content }] }),
+        body: JSON.stringify({ parts }),
       });
+    },
+
+    abortSession: async () => {
+      const { activeSession } = get();
+      if (activeSession) {
+        await apiFetch(`/session/${activeSession.id}/abort`, { method: "POST" }).catch(() => null);
+      }
+      set({ running: false, isStreaming: false });
     },
 
     replyPermission: async (id: string, action: "allow" | "deny") => {
       const { activeSession } = get();
       if (!activeSession) return;
-      await apiFetch(`/session/${activeSession.id}/permission/${id}`, {
-        method: "POST",
-        body: JSON.stringify({ action }),
-      });
+
+      const reply = action === "allow" ? "once" : "reject";
+      const ok =
+        await apiPostJsonOk(`/permission/${id}/reply`, { reply }) ||
+        await apiPostJsonOk(`/session/${activeSession.id}/permissions/${id}`, { response: reply }) ||
+        await apiPostJsonOk(`/session/${activeSession.id}/permission/${id}`, { action });
+
+      if (!ok) throw new Error("permission reply failed");
       set({ permission: null });
+    },
+
+    loadProviders: async () => {
+      try {
+        const cfg = await apiFetch<{ model?: string }>("/config");
+        const provData = await apiFetch<{ providers: Provider[] }>("/config/providers");
+        set({
+          providers: provData.providers ?? [],
+          currentModel: cfg.model ?? null,
+        });
+      } catch {
+        set({ providers: [], currentModel: null });
+      }
+    },
+
+    setModel: async (modelId: string) => {
+      try {
+        await apiFetch("/global/config", {
+          method: "PATCH",
+          body: JSON.stringify({ model: modelId }),
+        });
+        set({ currentModel: modelId });
+      } catch (e) {
+        console.error("setModel failed", e);
+      }
     },
   };
 });

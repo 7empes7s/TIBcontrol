@@ -85,6 +85,22 @@ export function getModelHealth(): ModelHealth {
 
 // ── Detail model (used by /api/models handler) ────────────────────────────────
 
+export interface WorkloadScores {
+  json: number | null;
+  coding: number | null;
+  writing: number | null;
+  reasoning: number | null;
+  lastProbedAt: number | null;
+}
+
+export interface RatingBreakdown {
+  score: number | null;
+  confidence: number;
+  sources: string[];
+  missing: string[];
+  components: Record<string, { score: number; weight: number; contribution: number }>;
+}
+
 export interface ModelEntry {
   logicalName: string;
   provider: string;
@@ -96,6 +112,47 @@ export interface ModelEntry {
   qualityStatus: "healthy" | "probation" | "degraded" | "blocked" | "unknown";
   recentFailures: number;
   consecutiveGarbage: number;
+  isFree: boolean;
+  isPaid: boolean;
+  isSubscription: boolean;
+  pricingTier: PricingTier;
+  isOpenCode: boolean;
+  isCli: boolean;
+  providerType: "openrouter" | "groq" | "github" | "cerebras" | "local" | "zen" | "nvidia" | "cloudflare" | "opencode" | "alibaba" | "other";
+  contextWindow: number | null;
+  params: number | null;
+  resolvedModel: string | null;
+  rating100: number | null;
+  ratingBreakdown: RatingBreakdown | null;
+  workloadScores: WorkloadScores | null;
+}
+
+export type PricingTier = "free-local" | "free-rate-limited" | "subscription" | "api-paid";
+
+function derivePricingTier(m: { provider?: string; logicalName?: string; modelId?: string; apiKeyEnv?: string }): PricingTier {
+  const provider = String(m.provider || "").toLowerCase();
+  const logicalName = String(m.logicalName || "");
+  const modelId = String(m.modelId || "");
+  const apiKeyEnv = String(m.apiKeyEnv || "");
+  if (provider === "local") return "free-local";
+  if (provider === "opencode" || provider === "alibaba") return "subscription";
+  if (logicalName.startsWith("opencode-go/") || logicalName.startsWith("alibaba/")) return "subscription";
+  if (provider === "cerebras") {
+    if (logicalName.endsWith("-paid") || apiKeyEnv === "CEREBRAS_API_KEY_PAID") return "api-paid";
+    return "free-rate-limited";
+  }
+  if (provider === "zen") {
+    if (modelId.endsWith("-free") || modelId.includes(":free") || logicalName.includes("-free")) return "free-rate-limited";
+    return "subscription";
+  }
+  if (provider === "openrouter") {
+    if (modelId.endsWith(":free") || logicalName.endsWith("-free") || logicalName.includes("-free-")) return "free-rate-limited";
+    return "api-paid";
+  }
+  if (provider === "groq" || provider === "github" || provider === "cloudflare" || provider === "nvidia") {
+    return "free-rate-limited";
+  }
+  return "subscription";
 }
 
 export interface CooldownEntry {
@@ -128,6 +185,50 @@ export interface ModelsDetailData {
   discoveryLog: DiscoveryLogEntry[];
 }
 
+function detectProviderType(name: string, provider: string): ModelEntry["providerType"] {
+  const n = name.toLowerCase();
+  if (n.includes("openrouter")) return "openrouter";
+  if (n.includes("groq")) return "groq";
+  if (n.includes("github")) return "github";
+  if (n.includes("cerebras")) return "cerebras";
+  if (n.includes("zen-") || n.includes("zen ")) return "zen";
+  if (n.includes("nvidia")) return "nvidia";
+  if (n.includes("cf-") || n.includes("cloudflare")) return "cloudflare";
+  if (provider === "opencode" || n.startsWith("opencode-go/")) return "opencode";
+  if (provider === "alibaba" || n.startsWith("alibaba/")) return "alibaba";
+  if (provider === "local" || name.startsWith("editorial-") || name.startsWith("coding-") || name.startsWith("mimule-")) return "local";
+  return "other";
+}
+
+function detectPricing(name: string): { isFree: boolean; isPaid: boolean } {
+  const n = name.toLowerCase();
+  const freeKeywords = ["free", "trial", "-free", "no-cost", "openrouter-", "groq-", "github-", "cerebras-"];
+  const paidKeywords = ["paid", "pro", "premium", "zen-", "groq-", "-paid"];
+
+  const hasExplicitFree = freeKeywords.some(k => n.includes(k));
+  const hasExplicitPaid = paidKeywords.some(k => n.includes(k));
+
+  if (hasExplicitPaid) return { isFree: false, isPaid: true };
+  if (hasExplicitFree || n.includes("openrouter") || n.includes("github") || n.includes("cerebras") || n.includes("groq")) {
+    return { isFree: true, isPaid: false };
+  }
+  // Alibaba and OpenCode-native models are accessible through the subscription;
+  // they are neither explicitly free nor pay-per-use paid.
+  if (n.startsWith("alibaba/") || n.startsWith("opencode-go/") || n.startsWith("opencode/")) {
+    return { isFree: false, isPaid: false };
+  }
+  return { isFree: false, isPaid: true };
+}
+
+function detectCliRelated(name: string): boolean {
+  const cliModels = ["codex", "claude", "opencode", "gemini", "ollama"];
+  return cliModels.some(c => name.toLowerCase().includes(c));
+}
+
+function detectOpenCode(name: string): boolean {
+  return name.startsWith("opencode-") || name.includes("opencode") || name.startsWith("alibaba/");
+}
+
 export function getModelsDetail(): ModelsDetailData {
   const health = readJson<Record<string, unknown>>(MODEL_HEALTH_PATH);
   const cooldownsRaw = readJson<Record<string, { expiresAt?: number; startedAt?: number; reason?: string }>>(MODEL_COOLDOWNS_PATH) ?? {};
@@ -141,18 +242,48 @@ export function getModelsDetail(): ModelsDetailData {
   if (health && Array.isArray(health.models)) {
     for (const m of health.models as Array<Record<string, unknown>>) {
       const name = String(m.logicalName ?? "");
+      const provider = String(m.provider ?? "");
       const q = qualityModels[name];
+      const pricing = detectPricing(name);
+      const pricingTier: PricingTier = (m.pricingTier as PricingTier) ?? derivePricingTier({ provider, logicalName: name, modelId: m.modelId as string | undefined, apiKeyEnv: m.apiKeyEnv as string | undefined });
+
+      const rating100 = typeof m.rating100 === "number" ? m.rating100 : null;
+      const ratingBreakdown = m.ratingBreakdown != null ? (m.ratingBreakdown as RatingBreakdown) : null;
+      const rawWs = m.workloadScores as Record<string, unknown> | null | undefined;
+      const workloadScores: WorkloadScores | null = rawWs != null ? {
+        json: typeof rawWs.json === "number" ? rawWs.json : null,
+        coding: typeof rawWs.coding === "number" ? rawWs.coding : null,
+        writing: typeof rawWs.writing === "number" ? rawWs.writing : null,
+        reasoning: typeof rawWs.reasoning === "number" ? rawWs.reasoning : null,
+        lastProbedAt: typeof rawWs.lastProbedAt === "number" ? rawWs.lastProbedAt : null,
+      } : null;
+
       rawModels.push({
         logicalName: name,
-        provider: String(m.provider ?? ""),
+        provider,
         capability: String(m.capability ?? ""),
         available: Boolean(m.available),
         latency: typeof m.latency === "number" ? m.latency : null,
         jsonOk: Boolean(m.jsonOk),
         checkedAt: typeof m.checkedAt === "number" ? m.checkedAt : 0,
-        qualityStatus: (q?.status as ModelEntry["qualityStatus"]) ?? "unknown",
+        // opencode-go models are native/CLI-routed — they have no LiteLLM quality entries.
+        // Treat them as "healthy" by default so the model selector can use them.
+        qualityStatus: (q?.status as ModelEntry["qualityStatus"]) ?? (provider === "opencode" ? "healthy" : "unknown"),
         recentFailures: q?.recentFailures?.length ?? 0,
         consecutiveGarbage: q?.consecutiveGarbage ?? 0,
+        isFree: pricingTier === "free-local" || pricingTier === "free-rate-limited",
+        isPaid: pricingTier === "api-paid",
+        isSubscription: pricingTier === "subscription",
+        pricingTier,
+        isOpenCode: detectOpenCode(name),
+        isCli: detectCliRelated(name),
+        providerType: detectProviderType(name, provider),
+        contextWindow: typeof m.params === "number" && m.params >= 1000 ? m.params * 1000 : null,
+        params: typeof m.params === "number" ? m.params : null,
+        resolvedModel: typeof m.resolvedModel === "string" ? m.resolvedModel : null,
+        rating100,
+        ratingBreakdown,
+        workloadScores,
       });
     }
   }

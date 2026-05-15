@@ -1,6 +1,10 @@
 import { useState } from "react";
 import { useApi } from "../hooks/useApi";
+import { useAction } from "../hooks/useAction";
 import type { DoctorDetail } from "../../server/api/types";
+import { SectionCard } from "../components/SectionCard";
+import { useTablePage } from "../hooks/useTablePage";
+import { TablePageControls } from "../components/TablePageControls";
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell, Legend,
@@ -11,31 +15,33 @@ function Pill({ children, color = "gray" }: { children: React.ReactNode; color?:
 }
 
 function verdictColor(action: string): string {
-  if (action === "requeued" || action === "promoted") return "green";
-  if (action === "abandoned") return "red";
-  if (action === "cooldown") return "amber";
+  if (["requeued", "promoted", "retry", "retry_escalate", "skip_stage"].includes(action)) return "green";
+  if (["kill", "dead-content", "dead_content", "abandoned"].includes(action)) return "red";
+  if (["cooldown", "reroute_provider", "escalate", "waiting-quota", "waiting-gpu"].includes(action)) return "amber";
   return "gray";
 }
 
 export function DoctorPage() {
-  const { data, loading, error } = useApi<DoctorDetail>("/api/doctor", 15_000);
+  const { data, loading, error, refresh } = useApi<DoctorDetail>("/api/doctor", 15_000);
+  const scan = useAction("/api/doctor/scan");
   const [filterStage, setFilterStage] = useState("");
   const [filterError, setFilterError] = useState("");
   const [filterModel, setFilterModel] = useState("");
 
-  if (loading && !data) return <div className="loading-dim">loading…</div>;
-  if (error && !data) return <div className="loading-dim" style={{ color: "var(--red)" }}>error: {error}</div>;
-  if (!data) return null;
-
-  const d = data;
-  const successPct = d.stats.total > 0 ? Math.round(d.stats.successRate * 100) : null;
-
-  const filtered = d.entries.filter((e) => {
+  const filtered = (data?.entries ?? []).filter((e) => {
     if (filterStage && e.stage !== filterStage) return false;
     if (filterError && e.errorType !== filterError) return false;
     if (filterModel && e.failedModel !== filterModel) return false;
     return true;
   }).slice().reverse(); // newest first
+  const doctorPage = useTablePage(filtered);
+
+  if (loading && !data) return <div className="loading-dim">loading…</div>;
+  if (error && !data) return <div className="loading-dim error">error: {error}</div>;
+  if (!data) return null;
+
+  const d = data;
+  const successPct = d.stats.total > 0 ? Math.round(d.stats.successRate * 100) : null;
 
   // Unique values for filters
   const stages = [...new Set(d.entries.map((e) => e.stage).filter(Boolean))].sort();
@@ -66,12 +72,25 @@ export function DoctorPage() {
             </div>
           )}
         </div>
+        <div className="action-bar" style={{ marginTop: 12 }}>
+          <button
+            className="btn btn-ghost"
+            disabled={scan.loading}
+            onClick={async () => {
+              const ok = await scan.run();
+              if (ok) refresh();
+            }}
+          >
+            {scan.loading ? "Running scan..." : "Run doctor scan"}
+          </button>
+          {scan.success && <span className="action-feedback ok">{scan.success}</span>}
+          {scan.error && <span className="action-feedback err">{scan.error}</span>}
+        </div>
       </div>
 
       {/* Stats charts */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 8, marginBottom: 16 }}>
-        <div className="section-card" id="errors">
-          <div className="section-card-header"><span className="title">error classes (24h)</span></div>
+        <SectionCard title="error classes (24h)" id="errors" defaultOpen={true}>
           <div className="section-card-body" style={{ padding: "10px 14px" }}>
             {d.stats.errorClasses.length === 0 ? <div className="loading-dim">none</div> : (
               <ResponsiveContainer width="100%" height={Math.max(60, d.stats.errorClasses.length * 22)}>
@@ -96,10 +115,9 @@ export function DoctorPage() {
               </ResponsiveContainer>
             )}
           </div>
-        </div>
+        </SectionCard>
 
-        <div className="section-card" id="models">
-          <div className="section-card-header"><span className="title">top failing models</span></div>
+        <SectionCard title="top failing models" id="models" defaultOpen={false}>
           <div className="section-card-body" style={{ padding: "10px 14px" }}>
             {d.stats.topFailingModels.length === 0 ? <div className="loading-dim">none</div> : (
               d.stats.topFailingModels.map((m) => (
@@ -110,10 +128,9 @@ export function DoctorPage() {
               ))
             )}
           </div>
-        </div>
+        </SectionCard>
 
-        <div className="section-card" id="verdicts">
-          <div className="section-card-header"><span className="title">verdict mix</span></div>
+        <SectionCard title="verdict mix" id="verdicts" defaultOpen={false}>
           <div className="section-card-body" style={{ padding: "10px 14px" }}>
             {d.stats.verdictMix.length === 0 ? <div className="loading-dim">none</div> : (() => {
               const COLORS: Record<string, string> = {
@@ -144,15 +161,15 @@ export function DoctorPage() {
               );
             })()}
           </div>
-        </div>
+        </SectionCard>
       </div>
 
       {/* Full log */}
-      <div className="section-card">
-        <div className="section-card-header">
-          <span className="title">decision log</span>
-          <span className="dim" style={{ fontFamily: "var(--mono)", fontSize: 10 }}>{d.entries.length} entries (last 2MB)</span>
-        </div>
+      <SectionCard
+        title="decision log"
+        defaultOpen={false}
+        right={<span className="dim" style={{ fontFamily: "var(--mono)", fontSize: 10 }}>{d.entries.length} entries</span>}
+      >
         <div style={{ padding: "8px 14px", borderBottom: "1px solid var(--border)", display: "flex", gap: 8, flexWrap: "wrap" }}>
           <select value={filterStage} onChange={(e) => setFilterStage(e.target.value)}
             style={{ fontFamily: "var(--mono)", fontSize: 11, background: "var(--bg-hover)", border: "1px solid var(--border)", color: "var(--text)", padding: "3px 8px", borderRadius: 3 }}>
@@ -182,7 +199,7 @@ export function DoctorPage() {
               <th>time</th><th>slug</th><th>stage</th><th>error</th><th>model</th><th>verdict</th><th>reason</th>
             </tr></thead>
             <tbody>
-              {filtered.slice(0, 200).map((e, i) => (
+              {doctorPage.slice.map((e, i) => (
                 <tr key={i}>
                   <td className="mono dim" style={{ whiteSpace: "nowrap" }}>{e.ts.slice(0, 19).replace("T", " ")}</td>
                   <td className="mono trunc" style={{ maxWidth: 160 }}>{e.slug}</td>
@@ -195,11 +212,9 @@ export function DoctorPage() {
               ))}
             </tbody>
           </table>
-          {filtered.length > 200 && (
-            <div className="loading-dim">showing 200 of {filtered.length} entries</div>
-          )}
         </div>
-      </div>
+        <TablePageControls {...doctorPage} onPrev={doctorPage.prev} onNext={doctorPage.next} onSetPageSize={doctorPage.setPageSize} noun="entries" />
+      </SectionCard>
     </div>
   );
 }

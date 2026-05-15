@@ -12,9 +12,13 @@ export interface DoctorEntry {
   action?: string;
   reason?: string;
   errorType?: string;
+  class?: string;
   failedModel?: string;
+  model?: string;
+  diagnosis?: string;
   nextStage?: string;
   cooldownMs?: number;
+  applied?: boolean;
 }
 
 function tailJsonl(path: string, maxBytes = TAIL_BYTES): DoctorEntry[] {
@@ -48,6 +52,49 @@ function top<T extends string>(map: Map<T, number>, n = 5): { key: T; count: num
     .map(([key, count]) => ({ key, count }));
 }
 
+function classifyDiagnosis(diagnosis: string | undefined): string {
+  const normalized = diagnosis?.toLowerCase() ?? "";
+  if (!normalized) {
+    return "";
+  }
+  if (
+    normalized.includes("insufficient_quota") ||
+    normalized.includes("quota") ||
+    normalized.includes("spending cap") ||
+    normalized.includes("billing")
+  ) {
+    return "quota";
+  }
+  if (
+    normalized.includes("ratelimit") ||
+    normalized.includes("rate limit") ||
+    normalized.includes("rate_limit") ||
+    normalized.includes("429")
+  ) {
+    return "rate_limit";
+  }
+  return "";
+}
+
+export function getDoctorEntryErrorType(entry: DoctorEntry): string {
+  const diagnosisClass = classifyDiagnosis(entry.diagnosis);
+  if (entry.errorType) {
+    return entry.errorType;
+  }
+  if (diagnosisClass && (!entry.class || entry.class === "unknown")) {
+    return diagnosisClass;
+  }
+  return entry.class || diagnosisClass;
+}
+
+export function getDoctorEntryFailedModel(entry: DoctorEntry): string {
+  return entry.failedModel || entry.model || "";
+}
+
+export function getDoctorEntryReason(entry: DoctorEntry): string {
+  return entry.reason || entry.diagnosis || "";
+}
+
 export interface DoctorStats {
   total: number;
   success: number;
@@ -78,13 +125,18 @@ export function getDoctorStats(): DoctorStats {
   const actionMap = new Map<string, number>();
 
   for (const e of deduped) {
-    if (e.errorType) errorMap.set(e.errorType, (errorMap.get(e.errorType) ?? 0) + 1);
-    if (e.failedModel) modelMap.set(e.failedModel, (modelMap.get(e.failedModel) ?? 0) + 1);
+    const errorType = getDoctorEntryErrorType(e);
+    const failedModel = getDoctorEntryFailedModel(e);
+    if (errorType) errorMap.set(errorType, (errorMap.get(errorType) ?? 0) + 1);
+    if (failedModel) modelMap.set(failedModel, (modelMap.get(failedModel) ?? 0) + 1);
     if (e.stage) stageMap.set(e.stage, (stageMap.get(e.stage) ?? 0) + 1);
     if (e.action) actionMap.set(e.action, (actionMap.get(e.action) ?? 0) + 1);
   }
 
-  const success = deduped.filter((e) => e.action === "requeued" || e.action === "promoted").length;
+  // LLM doctor uses: retry, retry_escalate, skip_stage (positive), kill, no_action, dead_content (negative)
+  // Rule-based doctor uses: requeued, promoted (positive), dead-content, escalate (negative)
+  const SUCCESS_ACTIONS = new Set(["requeued", "promoted", "retry", "retry_escalate", "skip_stage"]);
+  const success = deduped.filter((e) => e.action && SUCCESS_ACTIONS.has(e.action) && e.applied !== false).length;
   const last = deduped[deduped.length - 1] ?? null;
 
   return {
@@ -95,7 +147,7 @@ export function getDoctorStats(): DoctorStats {
     topFailingStages: top(stageMap, 3).map(({ key, count }) => ({ stage: key, count })),
     verdictMix: top(actionMap).map(({ key, count }) => ({ action: key, count })),
     lastDecision: last
-      ? { ts: last.ts, slug: last.slug ?? "", action: last.action ?? "", reason: last.reason ?? "" }
+      ? { ts: last.ts, slug: last.slug ?? "", action: last.action ?? "", reason: getDoctorEntryReason(last) }
       : null,
   };
 }

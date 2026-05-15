@@ -3,6 +3,140 @@ import { useApi, fmtAge, fmtMs } from "../hooks/useApi";
 import { useStream } from "../hooks/useStream";
 import type { HomeData } from "../../server/api/types";
 import { BarChart, Bar, ResponsiveContainer, Tooltip, Cell } from "recharts";
+import { AnimatedNumber, AreaSparkline, Gauge, LiveTick, PipelineFlowBar } from "../components/AnimatedCharts";
+
+interface MissionControlData {
+  nowCard: {
+    posture: "ok" | "warn" | "critical";
+    summary: string;
+    sources: string[];
+  };
+  decisionQueue: Array<{
+    id: string;
+    severity: "info" | "warn" | "critical";
+    title: string;
+    description: string;
+    ageMs: number;
+    action?: string;
+    actionId?: string;
+    sourceRoute?: string;
+  }>;
+  changeSinceLastVisit: {
+    lastVisitTs: number | null;
+    newArticles: number;
+    queueDelta: number;
+    newIncidents: number;
+    modelsChanged: number;
+    vastRunwayDeltaHours: number | null;
+  } | null;
+  nextBestActions: Array<{
+    id: string;
+    label: string;
+    description: string;
+    risk: "low" | "medium" | "high";
+    targetRoute?: string;
+  }>;
+  riskStrip: Array<{
+    kind: "runway" | "stale_telemetry" | "failed_check" | "incident" | "disk" | "queue";
+    label: string;
+    severity: "ok" | "warn" | "critical";
+    value?: string;
+  }>;
+}
+
+function MissionControlDeck() {
+  const { data, loading, error } = useApi<MissionControlData>("/api/mission-control", 60_000);
+
+  if (loading && !data) return <div className="loading-dim">loading…</div>;
+  if (error && !data) return <div className="loading-dim error">…</div>;
+  if (!data) return null;
+
+  const d = data;
+
+  const postureColor = d.nowCard.posture === "ok" ? "var(--green)" : d.nowCard.posture === "warn" ? "var(--amber)" : "var(--red)";
+
+  return (
+    <div className="dash-section">
+      {/* Now Card */}
+      <div style={{ padding: "12px 16px", background: `${postureColor}15`, borderLeft: `4px solid ${postureColor}`, marginBottom: 12, borderRadius: 4 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ width: 8, height: 8, borderRadius: "50%", background: postureColor }} />
+          <span className="w-label">Now</span>
+        </div>
+        <div style={{ marginTop: 8, fontSize: 14 }}>{d.nowCard.summary}</div>
+        {d.decisionQueue[0]?.sourceRoute && (
+          <Link href={d.decisionQueue[0].sourceRoute} className="btn btn-ghost" style={{ marginTop: 8, padding: "4px 8px", fontSize: 11 }}>
+            → Go
+          </Link>
+        )}
+      </div>
+
+      {/* Decision Queue */}
+      {d.decisionQueue.length > 0 && (
+        <div style={{ marginBottom: 12 }}>
+          <div className="w-label" style={{ marginBottom: 6 }}>Decision queue</div>
+          {d.decisionQueue.slice(0, 5).map((item) => (
+            <div key={item.id} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4, padding: "4px 8px", background: "var(--bg-sub)", borderRadius: 3 }}>
+              <span className={`pill ${item.severity === "critical" ? "red" : item.severity === "warn" ? "amber" : "gray"}`} style={{ fontSize: 9 }}>
+                {item.severity}
+              </span>
+              <span style={{ flex: 1, fontSize: 12 }}>{item.title}</span>
+              {item.sourceRoute && (
+                <Link href={item.sourceRoute} style={{ fontSize: 10, color: "var(--accent)" }}>→ Go</Link>
+              )}
+            </div>
+          ))}
+          {d.decisionQueue.length > 5 && (
+            <div className="w-caption">+ {d.decisionQueue.length - 5} more</div>
+          )}
+        </div>
+      )}
+
+      {/* Next Best Actions */}
+      {d.nextBestActions.length > 0 && (
+        <div style={{ marginBottom: 12 }}>
+          <div className="w-label" style={{ marginBottom: 6 }}>Next actions</div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {d.nextBestActions.map((action) => (
+              action.targetRoute ? (
+                <Link key={action.id} href={action.targetRoute} className="pill green" style={{ fontSize: 11, cursor: "pointer" }}>
+                  {action.label}
+                </Link>
+              ) : (
+                <span key={action.id} className="pill gray" style={{ fontSize: 11 }}>{action.label}</span>
+              )
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Risk Strip */}
+      <div style={{ marginBottom: 12 }}>
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+          {d.riskStrip.map((item) => {
+            const dotColor = item.severity === "ok" ? "var(--green)" : item.severity === "warn" ? "var(--amber)" : "var(--red)";
+            return (
+              <span key={item.kind} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11 }}>
+                <span style={{ width: 6, height: 6, borderRadius: "50%", background: dotColor }} />
+                <span>{item.label}</span>
+                {item.value && <span className="dim">{item.value}</span>}
+              </span>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Change Since Last Visit */}
+      {d.changeSinceLastVisit && d.changeSinceLastVisit.lastVisitTs !== null && (
+        <div className="w-caption" style={{ color: "var(--text-dim)", fontSize: 11 }}>
+          Since last visit: {d.changeSinceLastVisit.newArticles > 0 ? `+${d.changeSinceLastVisit.newArticles} articles` : `${d.changeSinceLastVisit.newArticles} articles`}
+          {d.changeSinceLastVisit.queueDelta !== 0 && `, ${d.changeSinceLastVisit.queueDelta > 0 ? "+" : ""}${d.changeSinceLastVisit.queueDelta} queue`}
+          {d.changeSinceLastVisit.newIncidents > 0 && `, ${d.changeSinceLastVisit.newIncidents} incidents`}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function StatusDot({ status }: { status: string }) {
   const cls = status === "active" ? "active" : status === "failed" ? "failed" : status === "inactive" ? "inactive" : "unknown";
@@ -21,23 +155,8 @@ function WCard({ href, children, className = "" }: { href?: string; children: Re
 }
 
 function SparkBars({ values }: { values: number[] }) {
-  const data = values.map((v, i) => ({ i, v }));
   return (
-    <ResponsiveContainer width="100%" height={32}>
-      <BarChart data={data} margin={{ top: 2, right: 0, bottom: 0, left: 0 }}>
-        <Tooltip
-          contentStyle={{ background: "#111", border: "1px solid #222", borderRadius: 3, fontFamily: "var(--mono)", fontSize: 10 }}
-          itemStyle={{ color: "#4ade80" }}
-          formatter={(val: number) => [val, "articles"]}
-          labelFormatter={() => ""}
-        />
-        <Bar dataKey="v" radius={[2, 2, 0, 0]}>
-          {data.map((d) => (
-            <Cell key={d.i} fill={d.v > 0 ? "#4ade80" : "#222"} opacity={d.v > 0 ? 0.75 : 1} />
-          ))}
-        </Bar>
-      </BarChart>
-    </ResponsiveContainer>
+    <AreaSparkline values={values} height={40} gradientId="sparkline-home" />
   );
 }
 
@@ -48,7 +167,7 @@ export function DashHome() {
   const data = streamData ?? pollData;
 
   if (loading && !data) return <div className="loading-dim">loading…</div>;
-  if (error && !data) return <div className="loading-dim" style={{ color: "var(--red)" }}>failed to load: {error}</div>;
+  if (error && !data) return <div className="loading-dim error">failed to load: {error}</div>;
   if (!data) return null;
 
   const d = data;
@@ -70,6 +189,9 @@ export function DashHome() {
   return (
     <div className="dash-page">
 
+      {/* ── Mission Control deck ────────────────────────── */}
+      <MissionControlDeck />
+
       {/* ── Stack health ─────────────────────────────── */}
       <div className="dash-section">
         <div className="dash-section-title">stack health</div>
@@ -90,11 +212,14 @@ export function DashHome() {
 
         <div className="widget-grid" style={{ marginTop: 8 }}>
           <WCard href="/infra#gpu">
-            <div className="w-label">gpu</div>
-            <div className="w-row">
-              <Pill color={gpuColor}>{d.gpu.status}</Pill>
-              {d.gpu.gpuUtil !== null && <span className="w-caption">{d.gpu.gpuUtil}% util</span>}
+            <div className="w-label" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              gpu <Pill color={gpuColor}>{d.gpu.status}</Pill>
             </div>
+            {d.gpu.gpuUtil !== null ? (
+              <Gauge pct={d.gpu.gpuUtil} label="utilization" />
+            ) : (
+              <div className="w-caption" style={{ marginTop: 6 }}>util not available</div>
+            )}
             {d.gpu.loadedModels.length > 0 && (
               <div className="w-caption" style={{ marginTop: 4 }}>
                 {d.gpu.loadedModels.join(", ")}
@@ -135,8 +260,10 @@ export function DashHome() {
         <div className="dash-section-title">newsbites</div>
         <div className="widget-grid">
           <WCard href="/newsbites">
-            <div className="w-label">total published</div>
-            <div className="w-headline">{d.newsbites.totalPublished}</div>
+            <div className="w-label" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              total published <LiveTick live={connected ?? false} />
+            </div>
+            <div className="w-headline"><AnimatedNumber value={d.newsbites.totalPublished} /></div>
             <div className="w-caption">+{d.newsbites.publishedToday} today</div>
           </WCard>
 
@@ -177,12 +304,14 @@ export function DashHome() {
         <div className="widget-grid">
           <WCard href="/autopipeline#queue">
             <div className="w-label">queue depth</div>
-            <div className="w-headline">{d.autopipeline.queueDepth}</div>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 6 }}>
-              {Object.entries(d.autopipeline.stageBreakdown).map(([stage, count]) => (
-                <span key={stage} className="pill gray">{stage} {count}</span>
-              ))}
-            </div>
+            <div className="w-headline"><AnimatedNumber value={d.autopipeline.queueDepth} /></div>
+            <PipelineFlowBar stages={[
+              { name: "scout",    count: d.autopipeline.stageBreakdown["scout"]    ?? 0 },
+              { name: "research", count: d.autopipeline.stageBreakdown["research"] ?? 0, hot: (d.autopipeline.stageBreakdown["research"] ?? 0) > 0 },
+              { name: "write",    count: d.autopipeline.stageBreakdown["write"]    ?? 0, hot: (d.autopipeline.stageBreakdown["write"]    ?? 0) > 0 },
+              { name: "verify",   count: d.autopipeline.stageBreakdown["verify"]   ?? 0 },
+              { name: "publish",  count: d.autopipeline.stageBreakdown["publish"]  ?? 0, warn: (d.autopipeline.stageBreakdown["publish"]  ?? 0) > 0 },
+            ]} />
           </WCard>
 
           <WCard href="/autopipeline#current">

@@ -6,6 +6,10 @@ import type { AutopipelineDetail } from "../../server/api/types";
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell,
 } from "recharts";
+import { AnimatedNumber } from "../components/AnimatedCharts";
+import { SectionCard } from "../components/SectionCard";
+import { useTablePage } from "../hooks/useTablePage";
+import { TablePageControls } from "../components/TablePageControls";
 
 function Pill({ children, color = "gray" }: { children: React.ReactNode; color?: string }) {
   return <span className={`pill ${color}`}>{children}</span>;
@@ -46,8 +50,15 @@ export function AutopipelinePage() {
   const [modal, setModal] = useState<Modal | null>(null);
   const cmd = useAction("/api/autopipeline/command");
 
+  const queueItems = data?.queue ?? [];
+  const approvals = queueItems.filter((i) => i.waitingApproval);
+  const durationRows = (data?.stageDurations ?? []).filter((row) => row.sampleCount > 0);
+  const queuePage = useTablePage(queueItems);
+  const approvalsPage = useTablePage(approvals);
+  const durationsPage = useTablePage(durationRows);
+
   if (loading && !data) return <div className="loading-dim">loading…</div>;
-  if (error && !data) return <div className="loading-dim" style={{ color: "var(--red)" }}>error: {error}</div>;
+  if (error && !data) return <div className="loading-dim error">error: {error}</div>;
   if (!data) return null;
 
   const d = data;
@@ -58,11 +69,11 @@ export function AutopipelinePage() {
         <div className="page-title">Autopipeline</div>
         <div className="stat-row">
           <div className="stat-item">
-            <div className="stat-val">{d.stats.queueDepth}</div>
+            <div className="stat-val"><AnimatedNumber value={d.stats.queueDepth} /></div>
             <div className="stat-lbl">queued</div>
           </div>
           <div className="stat-item">
-            <div className="stat-val">{d.stats.approvalsWaiting}</div>
+            <div className="stat-val"><AnimatedNumber value={d.stats.approvalsWaiting} /></div>
             <div className="stat-lbl">waiting approval</div>
           </div>
           <div className="stat-item" style={{ display: "flex", alignItems: "flex-start", flexDirection: "column", gap: 2 }}>
@@ -133,27 +144,29 @@ export function AutopipelinePage() {
 
       {/* Current story */}
       {d.current && (
-        <div className="section-card" id="current">
-          <div className="section-card-header"><span className="title">current story</span></div>
+        <SectionCard title="current story" id="current" defaultOpen={true}>
           <div className="section-card-body" style={{ padding: "12px 14px" }}>
             <div style={{ fontFamily: "var(--mono)", fontSize: 13, color: "var(--text-bright)", marginBottom: 6 }}>
               {d.current.slug ?? d.current.id}
             </div>
             <Pill color="amber">{d.current.stage}</Pill>
           </div>
-        </div>
+        </SectionCard>
       )}
 
       {/* Queue */}
-      <div className="section-card" id="queue">
-        <div className="section-card-header">
-          <span className="title">queue</span>
+      <SectionCard
+        title="queue"
+        id="queue"
+        defaultOpen={false}
+        right={
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
             {Object.entries(d.stats.stageBreakdown).map(([stage, count]) => (
               <Pill key={stage} color="gray">{stage} {count}</Pill>
             ))}
           </div>
-        </div>
+        }
+      >
         <div className="section-card-body table-wrap">
           {d.queue.length === 0 ? (
             <div className="loading-dim">queue empty</div>
@@ -163,11 +176,11 @@ export function AutopipelinePage() {
                 <th>slug / id</th><th>stage</th><th></th><th className="queue-col-priority">priority</th><th className="queue-col-elapsed">elapsed</th><th className="queue-col-flags">flags</th>
               </tr></thead>
               <tbody>
-                {d.queue.map((item) => (
+                {queuePage.slice.map((item) => (
                   <tr key={item.id}>
                     <td className="mono trunc">{item.slug ?? item.id}</td>
                     <td className="mono">{item.stage}</td>
-                    <td><div style={{ display: "flex", gap: 4 }}>
+                    <td><div style={{ display: "flex", gap: 4 }} className="queue-actions mobile-stack">
                         {item.stage === "publish" && item.waitingApproval && (
                           <button className="btn btn-sm btn-primary" onClick={() => setModal({ type: "publish", id: item.id, slug: item.slug })}>publish</button>
                         )}
@@ -188,17 +201,17 @@ export function AutopipelinePage() {
             </table>
           )}
         </div>
-      </div>
+        <TablePageControls {...queuePage} onPrev={queuePage.prev} onNext={queuePage.next} onSetPageSize={queuePage.setPageSize} noun="items" />
+      </SectionCard>
 
       {/* Approvals */}
       {d.stats.approvalsWaiting > 0 && (
-        <div className="section-card" id="approvals">
-          <div className="section-card-header"><span className="title">approvals waiting</span></div>
+        <SectionCard title="approvals waiting" id="approvals" defaultOpen={false}>
           <div className="section-card-body table-wrap">
             <table className="data-table">
               <thead><tr><th>slug / id</th><th>stage</th><th>age</th></tr></thead>
               <tbody>
-                {d.queue.filter((i) => i.waitingApproval).map((item) => (
+                {approvalsPage.slice.map((item) => (
                   <tr key={item.id}>
                     <td className="mono trunc">{item.slug ?? item.id}</td>
                     <td className="mono">{item.stage}</td>
@@ -208,13 +221,13 @@ export function AutopipelinePage() {
               </tbody>
             </table>
           </div>
-        </div>
+          <TablePageControls {...approvalsPage} onPrev={approvalsPage.prev} onNext={approvalsPage.next} onSetPageSize={approvalsPage.setPageSize} noun="items" />
+        </SectionCard>
       )}
 
       {/* Stage breakdown chart */}
       {Object.keys(d.stats.stageBreakdown).length > 0 && (
-        <div className="section-card" id="stages">
-          <div className="section-card-header"><span className="title">queue by stage</span></div>
+        <SectionCard title="queue by stage" id="stages" defaultOpen={false}>
           <div className="section-card-body" style={{ padding: "10px 14px" }}>
             {(() => {
               const stageOrder = ["scout", "research", "validate-research", "write", "validate-write", "verify", "publish-prep", "init", "fetch-image", "publish"];
@@ -250,16 +263,16 @@ export function AutopipelinePage() {
               );
             })()}
           </div>
-        </div>
+        </SectionCard>
       )}
 
       {/* Stage durations */}
-      <div className="section-card" id="throughput">
-        <div className="section-card-header"><span className="title">stage durations (from dossier timestamps)</span></div>
+      <SectionCard title="stage durations" id="throughput" defaultOpen={false}>
         <div className="section-card-body table-wrap">
-          <StageDurationTable durations={d.stageDurations} />
+          <StageDurationTable durations={durationsPage.slice} />
         </div>
-      </div>
+        <TablePageControls {...durationsPage} onPrev={durationsPage.prev} onNext={durationsPage.next} onSetPageSize={durationsPage.setPageSize} noun="stages" />
+      </SectionCard>
     </div>
   );
 }
